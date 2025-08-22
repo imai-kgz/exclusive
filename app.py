@@ -2,297 +2,440 @@ import streamlit as st
 import pandas as pd
 import os
 from io import BytesIO
+from fpdf import FPDF
+import openpyxl
 
-# --- Настройки ---
+# --- Settings ---
 DATA_DIR = "uploaded_files"
 os.makedirs(DATA_DIR, exist_ok=True)
+# Ensure both font files are in the same folder as the script
+FONT_REGULAR_PATH = "JetBrainsMono-Regular.ttf"
+FONT_BOLD_PATH = "JetBrainsMono-Bold.ttf"
 
-# --- Функции ---
-
-@st.cache_data
-def load_data_from_excel(file):
-    """Загружает и кэширует данные из Excel файла."""
-    df = pd.read_excel(file)
-    df = df.dropna(how='all').reset_index(drop=True)
-    
-    data = []
-    current_group = None
-    for index, row in df.iterrows():
-        is_group_header = (pd.isna(row.get('price')) or row.get('price') == '') and pd.notna(row.get('title')) and row.get('title') != ''
-        is_analysis_row = pd.notna(row.get('price')) and row.get('price') != '' and pd.notna(row.get('title')) and row.get('title') != ''
-        
-        if is_group_header:
-            current_group = row['title']
-        elif is_analysis_row:
-            try:
-                price_value = float(row['price'])
-            except (ValueError, TypeError):
-                price_value = 0.0
-            
-            data.append({
-                'original_index': index,
-                'group': current_group,
-                'title': row['title'],
-                'price': price_value,
-                'org': row.get('org', ''),
-                'time': row.get('time', '')
-            })
-    return pd.DataFrame(data)
-
-def save_uploaded_file(uploaded_file):
-    """Сохраняет загруженный файл на диск."""
-    file_path = os.path.join(DATA_DIR, uploaded_file.name)
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return file_path
-
-def save_changes_to_file(file_path, df_to_save):
-    """Обновляет цены, сохраняет файл и возвращает его содержимое в байтах для скачивания."""
-    try:
-        with pd.ExcelFile(file_path) as xls:
-            all_sheets = {sheet_name: pd.read_excel(xls, sheet_name=sheet_name, header=None) for sheet_name in xls.sheet_names}
-        
-        sheet_name = list(all_sheets.keys())[0]
-        df_sheet = all_sheets[sheet_name]
-
-        title_col_index = 0
-        price_col_index = 2
-        
-        price_map = {row['title']: row['price'] for _, row in df_to_save.iterrows()}
-
-        for index, row in df_sheet.iterrows():
-            title = row.get(title_col_index)
-            if title in price_map:
-                df_sheet.iat[index, price_col_index] = price_map[title]
-
-        # Создаем байтовый поток в памяти для скачивания
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            for sheet, df in all_sheets.items():
-                df.to_excel(writer, sheet_name=sheet, index=False, header=False)
-        
-        # Сохраняем файл на диск
-        with open(file_path, 'wb') as f:
-            f.write(output.getvalue())
-            
-        return output.getvalue()
-    except Exception as e:
-        st.error(f"Ошибка при сохранении файла: {e}")
-        return None
-
-def display_analysis_row(row, file_name, is_edit_mode):
-    """Отображает одну строку анализа (чекбокс, название, цена)."""
-    global_index = row.name
-    
-    cols = st.columns([8, 2])
-    with cols[0]:
-        checkbox_key = f"{file_name}_select_{global_index}"
-        is_checked = global_index in st.session_state.selected_analyses.get(file_name, [])
-        
-        if st.checkbox(row['title'], value=is_checked, key=checkbox_key):
-            if not is_checked:
-                st.session_state.selected_analyses[file_name].append(global_index)
-        else:
-            if is_checked:
-                st.session_state.selected_analyses[file_name].remove(global_index)
-
-    with cols[1]:
-        price_key = f"{file_name}_price_{global_index}"
-        current_price = float(row['price'])
-        
-        if is_edit_mode:
-            new_price = st.number_input(
-                "Цена", 
-                value=current_price, 
-                key=price_key, 
-                step=10.0, 
-                format="%.2f", 
-                label_visibility="collapsed"
-            )
-            if new_price != current_price:
-                st.session_state.files[file_name]['data'].at[global_index, 'price'] = new_price
-        else:
-            display_price = f"{int(current_price)}" if current_price == int(current_price) else f"{current_price:.2f}"
-            st.markdown(f"<p style='text-align: right; font-weight: bold;'>{display_price} сом</p>", unsafe_allow_html=True)
-
-# --- Инициализация состояния сессии ---
-# ... (весь блок инициализации session_state остается без изменений)
+# --- Session State Initialization ---
+if 'theme' not in st.session_state:
+    st.session_state.theme = 'dark'
 if 'files' not in st.session_state:
     st.session_state.files = {}
 if 'selected_analyses' not in st.session_state:
     st.session_state.selected_analyses = {}
 if 'price_edit_enabled' not in st.session_state:
     st.session_state.price_edit_enabled = {}
+if "show_selected" not in st.session_state:
+    st.session_state.show_selected = False
+
+# --- Core Functions ---
+
+@st.cache_data
+def load_data_from_excel(file_content):
+    """Loads and caches data from an Excel file's content, reading colors."""
+    wb = openpyxl.load_workbook(BytesIO(file_content), data_only=True)
+    sheet = wb.active
+    data = []
+    current_group = None
+
+    for row_idx, row in enumerate(sheet.iter_rows(min_row=1, values_only=False), start=1):
+        if len(row) < 5:
+            continue
+
+        title_cell, color0_cell, color1_cell, price_cell, time_cell = row[:5]
+        title = title_cell.value
+        price = price_cell.value
+
+        is_group_header = (price is None or price == '') and (title is not None and title != '')
+        is_analysis_row = (price is not None and price != '') and (title is not None and title != '')
+
+        if is_group_header:
+            current_group = title
+        elif is_analysis_row:
+            try:
+                price_value = float(price)
+            except (ValueError, TypeError):
+                price_value = 0.0
+
+            color0_color = f"#{color0_cell.fill.fgColor.rgb[2:]}".lower() if color0_cell.fill.patternType == 'solid' and color0_cell.fill.fgColor.rgb and color0_cell.fill.fgColor.rgb not in ('00000000', 'FFFFFFFF') else None
+            color1_color = f"#{color1_cell.fill.fgColor.rgb[2:]}".lower() if color1_cell.fill.patternType == 'solid' and color1_cell.fill.fgColor.rgb and color1_cell.fill.fgColor.rgb not in ('00000000', 'FFFFFFFF') else None
+
+            data.append({
+                'original_index': row_idx - 1,
+                'group': current_group,
+                'title': title,
+                'price': price_value,
+                'color_0_text': str(color0_cell.value or ''),
+                'color_0_color': color0_color,
+                'color_1_text': str(color1_cell.value or ''),
+                'color_1_color': color1_color,
+                'time': time_cell.value or ''
+            })
+    return pd.DataFrame(data)
+
+def save_uploaded_file(uploaded_file):
+    """Saves an uploaded file to the disk."""
+    file_path = os.path.join(DATA_DIR, uploaded_file.name)
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return file_path
+
+def save_changes_to_file(file_path, df_to_save):
+    """
+    Updates prices in the Excel file, preserving all existing styles (like colors),
+    and returns the file's content in bytes.
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path)
+        sheet = wb.active
+        price_map = {row['title']: row['price'] for _, row in df_to_save.iterrows()}
+
+        for row in sheet.iter_rows(min_row=1):
+            if len(row) > 3 and row[0].value in price_map and (row[3].value is not None and row[3].value != ''):
+                row[3].value = price_map[row[0].value]
+        
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        
+        with open(file_path, 'wb') as f:
+            f.write(output.getvalue())
+            
+        output.seek(0)
+        return output.getvalue()
+    except Exception as e:
+        st.error(f"Ошибка при сохранении файла: {e}")
+        return None
 
 
-# --- Стили (темная тема) ---
-# ... (блок стилей остается без изменений)
+def generate_pdf_receipt(selected_analyses_data):
+    """Generates a PDF receipt with aligned dots and handles long text."""
+    pdf = FPDF()
+    pdf.add_page()
+    
+    try:
+        pdf.add_font('DejaVu', '', FONT_REGULAR_PATH, uni=True)
+        pdf.add_font('DejaVu', 'B', FONT_BOLD_PATH, uni=True)
+    except Exception as e:
+        st.error(f"Font Error: {e}. Ensure font files are in the same folder.")
+        return None
+
+    pdf.set_font("DejaVu", size=16, style="B")
+    pdf.cell(0, 10, txt="Ваш Чек", ln=True, align="C")
+    pdf.ln(5)
+
+    pdf.set_font("DejaVu", size=11)
+    total_sum_pdf = 0
+    # Usable width of the page in mm (A4 is 210mm wide, minus 10mm margin on each side)
+    line_width = 190 
+
+    for item in selected_analyses_data:
+        color_texts = ' '.join(filter(None, [item.get('color_0_text'), item.get('color_1_text')])).strip()
+        full_title = f"{item['title']} ({color_texts})" if color_texts else item['title']
+        
+        price = float(item['price'])
+        # Using 'с' as the currency symbol based on the image
+        price_str = f"{price:,.2f} с"
+        total_sum_pdf += price
+        
+        price_width = pdf.get_string_width(price_str)
+        dot_width = pdf.get_string_width('.')
+
+        # --- Stage 1: Deconstruct the full title into properly wrapped lines ---
+        lines = []
+        remaining_text = full_title
+        while pdf.get_string_width(remaining_text) > 0:
+            line = remaining_text
+            # Shrink the line until it fits the page width
+            while pdf.get_string_width(line) > line_width:
+                line = line[:-1]
+            
+            # Find a clean break point (a space) to avoid splitting words
+            if len(line) < len(remaining_text): # Check if we are not on the last chunk of text
+                split_pos = line.rfind(' ')
+                if split_pos > 0:
+                    line = line[:split_pos]
+            
+            lines.append(line)
+            remaining_text = remaining_text[len(line):].strip()
+
+        # --- Stage 2: Render the lines, giving special treatment to the last one ---
+        if not lines:
+            continue
+
+        # Print all preliminary lines (if the item description is multi-line)
+        if len(lines) > 1:
+            for line in lines[:-1]:
+                pdf.cell(0, 8, txt=line, ln=True)
+        
+        # Process the final line, which must include the price
+        last_line = lines[-1]
+        last_line_width = pdf.get_string_width(last_line)
+
+        # Decision: Can the last line of text and price fit together?
+        if last_line_width + price_width < (line_width - 5): # -5 provides a small margin
+            # YES: Print text, dots, and price on the same line
+            num_dots = int((line_width - last_line_width - price_width) / dot_width) if dot_width > 0 else 0
+            dots = '.' * max(0, num_dots)
+            
+            pdf.cell(last_line_width, 8, txt=last_line, ln=False)
+            pdf.cell(line_width - last_line_width - price_width, 8, txt=dots, ln=False)
+            pdf.cell(price_width, 8, txt=price_str, ln=True, align="R")
+        else:
+            # NO: The text is too long. Print it on its own line first.
+            pdf.cell(0, 8, txt=last_line, ln=True)
+            
+            # Then, print the dots and price on a new line underneath.
+            num_dots = int((line_width - price_width) / dot_width) if dot_width > 0 else 0
+            dots = '.' * max(0, num_dots)
+            
+            pdf.cell(line_width - price_width, 8, txt=dots, ln=False)
+            pdf.cell(price_width, 8, txt=price_str, ln=True, align="R")
+
+    pdf.ln(5)
+    pdf.set_font("DejaVu", size=14, style="B")
+    pdf.cell(150, 10, txt="Итого:", ln=False, align="R")
+    pdf.cell(40, 10, txt=f"{total_sum_pdf:,.2f} с", ln=True, align="R")
+    
+    return pdf.output(dest="S").encode('latin-1')
+
+
+# --- Helper UI Functions ---
+
+def get_text_color(bg_color):
+    """Determines if text should be black or white based on background luminance."""
+    if not bg_color or len(bg_color) != 7: return '#000000'
+    r, g, b = int(bg_color[1:3], 16), int(bg_color[3:5], 16), int(bg_color[5:7], 16)
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return '#000000' if luminance > 0.5 else '#ffffff'
+
+def get_color_display_html(item, col_prefix):
+    """Generates HTML for a colored cell display."""
+    text = item.get(col_prefix + '_text', '')
+    color = item.get(col_prefix + '_color')
+    if text:
+        text_color = get_text_color(color)
+        style = f"background-color:{color}; color:{text_color}; padding:2px 5px; border-radius:3px; font-size:14px;" if color else ""
+        return f"<span style='{style}'>{text}</span>"
+    if color:
+        return f"<div style='background-color:{color}; height:20px; width:100%; border-radius:3px;'></div>"
+    return ""
+
+def get_theme_styles(theme='dark'):
+    if theme == 'light':
+        return """
+        <style>
+            .stApp { background-color: #FFFFFF; color: #111111; font-size: 17px; }
+            .stExpander, .stNumberInput input { background-color: #EEEEEE; }
+            .stButton > button { background-color: #4CAF50; color: white; }
+            p, label, .stMarkdown, h1, h2, h3 { color: #111111 !important; }
+            #search-container { background-color: #FFFFFF; }
+            .price-text { color: #000 !important; }
+        </style>
+        """
+    return """
+    <style>
+        .stApp { background-color: #0E1117; color: #FAFAFA; font-size: 17px; }
+        .stExpander, .stNumberInput input { background-color: #262730; }
+        .stButton > button { background-color: #3f51b5; color: white; }
+        p, label, .stMarkdown, h1, h2, h3 { color: #FAFAFA !important; }
+        #search-container { background-color: #0E1117; }
+        .price-text { color: #fff !important; }
+    </style>
+    """
+
+# --- Main UI ---
+st.set_page_config(page_title="Калькулятор анализов", layout="wide")
+st.markdown(get_theme_styles(st.session_state.theme), unsafe_allow_html=True)
 st.markdown("""
 <style>
-.stApp {background-color: #121212; color: #ffffff;}
-#search-container {position: fixed; top: 0; left: 0; width: 100%; background-color: #1f1f1f; padding: 10px; z-index: 1001; box-shadow: 0 2px 4px rgba(0,0,0,0.2);}
-.main-content {margin-top: 70px;}
+    #search-container { position: fixed; top: 0; left: 0; width: 100%; padding: 10px 20px; z-index: 1001; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .main-content { margin-top: 80px; }
+    .price-text { text-align: left; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- UI ---
-st.set_page_config(page_title="Калькулятор анализов", layout="wide")
-
-# --- Фиксированный поиск ---
-st.markdown('<div id="search-container">', unsafe_allow_html=True)
-search_term = st.text_input("🔍 Поиск по анализам", key="global_search", label_visibility="collapsed", placeholder="🔍 Поиск по анализам")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# --- Основной контент ---
-st.markdown('<div class="main-content">', unsafe_allow_html=True)
-st.title("Калькулятор анализов")
-
-# --- Боковая панель для загрузки файлов ---
-# ... (блок боковой панели остается без изменений)
+# --- Sidebar ---
 with st.sidebar:
+    st.header("Настройки")
+    is_dark = st.toggle("Темная тема", value=(st.session_state.theme == 'dark'))
+    st.session_state.theme = 'dark' if is_dark else 'light'
+    
+    st.markdown("---")
     st.header("Импорт файлов")
     uploaded_files = st.file_uploader("Выберите .xlsx файлы", type="xlsx", accept_multiple_files=True)
 
     if uploaded_files:
-        for uploaded_file in uploaded_files:
-            if uploaded_file.name not in st.session_state.files:
-                file_path = save_uploaded_file(uploaded_file)
-                try:
-                    df = load_data_from_excel(uploaded_file)
-                    st.session_state.files[uploaded_file.name] = {'data': df, 'path': file_path}
-                    st.session_state.selected_analyses[uploaded_file.name] = []
-                    st.session_state.price_edit_enabled[uploaded_file.name] = False
-                    st.success(f"Файл {uploaded_file.name} успешно загружен!")
-                except Exception as e:
-                    st.error(f"Ошибка при обработке файла {uploaded_file.name}: {e}")
-    
+        for file in uploaded_files:
+            if file.name not in st.session_state.files:
+                path = save_uploaded_file(file)
+                df = load_data_from_excel(file.getvalue()) 
+                st.session_state.files[file.name] = {'data': df, 'path': path}
+                st.success(f"Файл {file.name} загружен.")
+                st.rerun()
+
+    # Autoload files from disk
     for fname in os.listdir(DATA_DIR):
         if fname.endswith('.xlsx') and fname not in st.session_state.files:
-            file_path = os.path.join(DATA_DIR, fname)
-            try:
-                with open(file_path, "rb") as f:
-                    df = load_data_from_excel(BytesIO(f.read()))
-                st.session_state.files[fname] = {'data': df, 'path': file_path}
-                if fname not in st.session_state.selected_analyses:
-                    st.session_state.selected_analyses[fname] = []
-                if fname not in st.session_state.price_edit_enabled:
-                    st.session_state.price_edit_enabled[fname] = False
-            except Exception as e:
-                st.error(f"Ошибка автозагрузки файла {fname}: {e}")
+            path = os.path.join(DATA_DIR, fname)
+            with open(path, "rb") as f:
+                df = load_data_from_excel(f.read())
+            st.session_state.files[fname] = {'data': df, 'path': path}
 
+# --- Main Content ---
+st.markdown('<div class="main-content">', unsafe_allow_html=True)
+st.title("Калькулятор анализов")
 
-# --- Основная область с вкладками ---
+st.markdown('<div id="search-container">', unsafe_allow_html=True)
+search_term = st.text_input("Поиск", placeholder="🔍 Поиск по названию, группе или тексту в ячейке", label_visibility="collapsed")
+st.markdown('</div>', unsafe_allow_html=True)
+
+total_sum = 0.0
+
 if not st.session_state.files:
-    st.info("Пожалуйста, импортируйте Excel файлы в боковой панели.")
+    st.header("📁 Файлы не загружены")
+    st.info("Пожалуйста, импортируйте один или несколько Excel файлов в боковой панели, чтобы начать работу.")
 else:
     tab_names = list(st.session_state.files.keys())
     tabs = st.tabs(tab_names)
-    
-    total_sum = 0.0
 
     for i, file_name in enumerate(tab_names):
         with tabs[i]:
-            if file_name not in st.session_state.files:
-                continue
-
+            if file_name not in st.session_state.files: continue
+            
             file_info = st.session_state.files[file_name]
             df = file_info['data']
             
-            # --- Панель управления для вкладки ---
-            cols_manage = st.columns([3, 2])
-            with cols_manage[0]:
-                 is_edit_mode = st.toggle(
-                    "Разрешить редактирование цен", 
-                    value=st.session_state.price_edit_enabled.get(file_name, False),
-                    key=f"price_edit_switch_{file_name}"
-                )
-                 st.session_state.price_edit_enabled[file_name] = is_edit_mode
+            # --- Панель управления ---
+            manage_cols = st.columns([2, 2, 1])
+            with manage_cols[0]:
+                is_edit_mode = st.toggle("Редактировать цены", key=f"edit_{file_name}")
             
-            with cols_manage[1]:
-                if is_edit_mode:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("💾 Сохранить", key=f"save_btn_{file_name}"):
-                            file_bytes = save_changes_to_file(file_info['path'], df)
-                            if file_bytes:
-                                st.session_state[f'download_data_{file_name}'] = {
-                                    "bytes": file_bytes,
-                                    "name": f"updated_{file_name}"
-                                }
-                                st.success("Сохранено!")
-                                load_data_from_excel.clear()
-                                if file_name in st.session_state.files:
-                                    del st.session_state.files[file_name]
-                                st.rerun()
-                            else:
-                                st.error("Ошибка сохранения.")
-                    
-                    with col2:
-                        download_info = st.session_state.get(f'download_data_{file_name}')
-                        if download_info:
-                            st.download_button(
-                                label=f"📥 Скачать",
-                                data=download_info['bytes'],
-                                file_name=download_info['name'],
-                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                key=f'download_btn_{file_name}'
-                            )
-            
-            # --- Фильтрация и отображение ---
-            # ... (этот блок остается без изменений)
-            filtered_df = df
+            if is_edit_mode:
+                with manage_cols[1]:
+                    if st.button("💾 Сохранить", key=f"save_{file_name}"):
+                        file_bytes = save_changes_to_file(file_info['path'], df)
+                        if file_bytes:
+                            st.session_state[f'download_{file_name}'] = {"bytes": file_bytes, "name": f"updated_{file_name}"}
+                            st.success("Сохранено!")
+                            load_data_from_excel.clear()
+                            if file_name in st.session_state.files:
+                                del st.session_state.files[file_name]
+                            st.rerun()
+                        else:
+                            st.error("Ошибка сохранения.")
+
+            # --- Кнопка удаления файла ---
+            with manage_cols[2]:
+                if st.button("🗑️ Удалить файл", key=f"delete_{file_name}"):
+                    try:
+                        os.remove(file_info['path'])
+                        # Очищаем все связанные данные из session_state
+                        for key in list(st.session_state.keys()):
+                            if isinstance(st.session_state[key], dict) and file_name in st.session_state[key]:
+                                del st.session_state[key][file_name]
+                        load_data_from_excel.clear()
+                        st.success(f"Файл {file_name} удален.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Не удалось удалить файл: {e}")
+
+            # --- Логика поиска и фильтрации ---
+            filtered_df = pd.DataFrame() # Начинаем с пустого DataFrame
             if search_term:
-                filtered_df = df[df['title'].str.contains(search_term, case=False, na=False)]
-            
-            if filtered_df.empty:
-                st.info("По вашему запросу ничего не найдено.")
-                continue
-
-            grouped = filtered_df.groupby('group', dropna=False)
-            for group_name, group_df in grouped:
-                group_title = group_name if pd.notna(group_name) and group_name else "Без категории"
+                search_lower = search_term.lower()
                 
-                with st.expander(group_title, expanded=bool(search_term)):
-                    for _, row in group_df.iterrows():
-                        display_analysis_row(row, file_name, is_edit_mode)
+                # Поиск по названию анализа и тексту в ячейках
+                item_mask = (
+                    df['title'].str.lower().str.contains(search_lower, na=False) |
+                    df['color_0_text'].str.lower().str.contains(search_lower, na=False) |
+                    df['color_1_text'].str.lower().str.contains(search_lower, na=False)
+                )
+                
+                # Поиск по названию группы
+                # Заполняем NaN пустыми строками для безопасного поиска
+                df['group'] = df['group'].fillna('')
+                matching_groups = df[df['group'].str.lower().str.contains(search_lower, na=False)]['group'].unique()
+                group_mask = df['group'].isin(matching_groups)
 
+                # Объединяем результаты
+                filtered_df = df[item_mask | group_mask]
+            else:
+                filtered_df = df
+
+            if filtered_df.empty:
+                st.info("Ничего не найдено.")
+            else:
+                # Группируем и отображаем
+                for group_name, group_df in filtered_df.groupby('group', dropna=False):
+                    # --- СКРЫВАЕМ ГРУППУ "БЕЗ КАТЕГОРИИ" ---
+                    if not group_name or pd.isna(group_name):
+                        continue
+
+                    with st.expander(group_name, expanded=bool(search_term)):
+                        for idx, row in group_df.iterrows():
+                            cols = st.columns([5, 1.5, 1.5, 2])
+                            is_checked = idx in st.session_state.selected_analyses.get(file_name, [])
+                            
+                            if cols[0].checkbox(row['title'], value=is_checked, key=f"check_{file_name}_{idx}"):
+                                if not is_checked:
+                                    st.session_state.selected_analyses.setdefault(file_name, []).append(idx)
+                            elif is_checked:
+                                st.session_state.selected_analyses[file_name].remove(idx)
+
+                            cols[1].markdown(get_color_display_html(row, 'color_0'), unsafe_allow_html=True)
+                            cols[2].markdown(get_color_display_html(row, 'color_1'), unsafe_allow_html=True)
+
+                            with cols[3]:
+                                if is_edit_mode:
+                                    new_price = st.number_input("Цена", value=float(row['price']), key=f"price_{file_name}_{idx}", label_visibility="collapsed")
+                                    if new_price != row['price']:
+                                        st.session_state.files[file_name]['data'].at[idx, 'price'] = new_price
+                                else:
+                                    price_str = f"{int(row['price'])}" if row['price'] == int(row['price']) else f"{row['price']:.2f}"
+                                    st.markdown(f"<p class='price-text'>{price_str} сом</p>", unsafe_allow_html=True)
+            
             selected_indices = st.session_state.selected_analyses.get(file_name, [])
             if selected_indices:
-                total_sum += df.loc[selected_indices, 'price'].sum()
+                valid_indices = [idx for idx in selected_indices if idx in df.index]
+                total_sum += df.loc[valid_indices, 'price'].sum()
+    
+    # --- Нижняя панель управления ---
+    st.markdown("---")
+    selected_data = []
+    for fname, indices in st.session_state.selected_analyses.items():
+        if indices and fname in st.session_state.files:
+            df_file = st.session_state.files[fname]['data']
+            valid_indices = [idx for idx in indices if idx in df_file.index]
+            for _, row in df_file.loc[valid_indices].iterrows():
+                selected_data.append(row.to_dict())
 
-# --- Плашка с итоговой суммой и кнопками управления ---
-# ... (этот блок остается без изменений)
-st.markdown("---")
-if st.session_state.files:
-    cols_bottom = st.columns([1, 1, 3])
-    with cols_bottom[0]:
-        if st.button("📋 Просмотреть выбранное"):
-            has_selection = any(st.session_state.selected_analyses.values())
-            if not has_selection:
-                st.info("Нет выбранных анализов.")
-            else:
-                st.subheader("Выбранные анализы:")
-                for file_name, indices in st.session_state.selected_analyses.items():
-                    if indices and file_name in st.session_state.files:
-                        st.write(f"**Файл: {file_name}**")
-                        df_file = st.session_state.files[file_name]['data']
-                        selected_df = df_file.loc[indices]
-                        for _, row in selected_df.iterrows():
-                            st.markdown(f"- {row['title']} ({row['price']:.2f} сом)")
-    with cols_bottom[1]:
-        if st.button("🗑️ Очистить все", key="clear_all_tabs_button"):
-            for file_name in st.session_state.selected_analyses:
-                st.session_state.selected_analyses[file_name] = []
+    if selected_data:
+        receipt_sum = sum(item['price'] for item in selected_data)
+        
+        button_label = f"🧾 Выбрано: {len(selected_data)} поз. на сумму {receipt_sum:,.2f} сом"
+        if st.button(button_label, key="toggle_selected"):
+            st.session_state.show_selected = not st.session_state.show_selected
+
+        if st.session_state.show_selected:
+            for item in selected_data:
+                cols = st.columns([5, 1.5, 1.5, 2])
+                cols[0].write(item['title'])
+                cols[1].markdown(get_color_display_html(item, 'color_0'), unsafe_allow_html=True)
+                cols[2].markdown(get_color_display_html(item, 'color_1'), unsafe_allow_html=True)
+                cols[3].markdown(f"<p class='price-text'>{item['price']:,.2f} сом</p>", unsafe_allow_html=True)
+        
+        bottom_cols = st.columns([1, 1])
+        pdf_bytes = generate_pdf_receipt(selected_data)
+        if pdf_bytes:
+            bottom_cols[0].download_button("Скачать чек (PDF)", data=pdf_bytes, file_name="check.pdf", mime="application/pdf")
+        
+        if bottom_cols[1].button("🗑️ Очистить все"):
+            st.session_state.selected_analyses.clear()
             st.rerun()
 
+# --- Плавающий итог ---
 total_sum_placeholder = st.empty()
-total_sum_placeholder.markdown(
-    f"""
-    <div style="position: fixed; bottom: 10px; right: 10px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
-        <h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3>
-    </div>
-    """, 
-    unsafe_allow_html=True
-)
+total_sum_placeholder.markdown(f"""
+<div style="position: fixed; bottom: 10px; right: 100px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
+    <h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3>
+</div>
+""", unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
