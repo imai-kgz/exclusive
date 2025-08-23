@@ -15,8 +15,8 @@ FONT_BOLD_PATH = "JetBrainsMono-Bold.ttf"
 # --- User Credentials ---
 # IMPORTANT: In a real production app, use st.secrets for storing credentials!
 # For this example, we are hardcoding them.
-VALID_USERNAME = "exclusive" 
-VALID_PASSWORD = "password123" # <-- CHANGE THIS to a secure password!
+VALID_USERNAME = st.secrets["APP_USERNAME"]
+VALID_PASSWORD = st.secrets["APP_PASSWORD"]
 
 # --- Session State Initialization ---
 if 'theme' not in st.session_state:
