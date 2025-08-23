@@ -12,6 +12,12 @@ os.makedirs(DATA_DIR, exist_ok=True)
 FONT_REGULAR_PATH = "JetBrainsMono-Regular.ttf"
 FONT_BOLD_PATH = "JetBrainsMono-Bold.ttf"
 
+# --- User Credentials ---
+# IMPORTANT: In a real production app, use st.secrets for storing credentials!
+# For this example, we are hardcoding them.
+VALID_USERNAME = "exclusive" 
+VALID_PASSWORD = "password123" # <-- CHANGE THIS to a secure password!
+
 # --- Session State Initialization ---
 if 'theme' not in st.session_state:
     st.session_state.theme = 'dark'
@@ -23,6 +29,9 @@ if 'price_edit_enabled' not in st.session_state:
     st.session_state.price_edit_enabled = {}
 if "show_selected" not in st.session_state:
     st.session_state.show_selected = False
+# Add new session state for login status
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
 
 # --- Core Functions ---
 
@@ -122,7 +131,6 @@ def generate_pdf_receipt(selected_analyses_data):
 
     pdf.set_font("DejaVu", size=11)
     total_sum_pdf = 0
-    # Usable width of the page in mm (A4 is 210mm wide, minus 10mm margin on each side)
     line_width = 190 
 
     for item in selected_analyses_data:
@@ -130,24 +138,20 @@ def generate_pdf_receipt(selected_analyses_data):
         full_title = f"{item['title']} ({color_texts})" if color_texts else item['title']
         
         price = float(item['price'])
-        # Using 'с' as the currency symbol based on the image
         price_str = f"{price:,.2f} с"
         total_sum_pdf += price
         
         price_width = pdf.get_string_width(price_str)
         dot_width = pdf.get_string_width('.')
 
-        # --- Stage 1: Deconstruct the full title into properly wrapped lines ---
         lines = []
         remaining_text = full_title
         while pdf.get_string_width(remaining_text) > 0:
             line = remaining_text
-            # Shrink the line until it fits the page width
             while pdf.get_string_width(line) > line_width:
                 line = line[:-1]
             
-            # Find a clean break point (a space) to avoid splitting words
-            if len(line) < len(remaining_text): # Check if we are not on the last chunk of text
+            if len(line) < len(remaining_text):
                 split_pos = line.rfind(' ')
                 if split_pos > 0:
                     line = line[:split_pos]
@@ -155,22 +159,17 @@ def generate_pdf_receipt(selected_analyses_data):
             lines.append(line)
             remaining_text = remaining_text[len(line):].strip()
 
-        # --- Stage 2: Render the lines, giving special treatment to the last one ---
         if not lines:
             continue
 
-        # Print all preliminary lines (if the item description is multi-line)
         if len(lines) > 1:
             for line in lines[:-1]:
                 pdf.cell(0, 8, txt=line, ln=True)
         
-        # Process the final line, which must include the price
         last_line = lines[-1]
         last_line_width = pdf.get_string_width(last_line)
 
-        # Decision: Can the last line of text and price fit together?
-        if last_line_width + price_width < (line_width - 5): # -5 provides a small margin
-            # YES: Print text, dots, and price on the same line
+        if last_line_width + price_width < (line_width - 5):
             num_dots = int((line_width - last_line_width - price_width) / dot_width) if dot_width > 0 else 0
             dots = '.' * max(0, num_dots)
             
@@ -178,10 +177,8 @@ def generate_pdf_receipt(selected_analyses_data):
             pdf.cell(line_width - last_line_width - price_width, 8, txt=dots, ln=False)
             pdf.cell(price_width, 8, txt=price_str, ln=True, align="R")
         else:
-            # NO: The text is too long. Print it on its own line first.
             pdf.cell(0, 8, txt=last_line, ln=True)
             
-            # Then, print the dots and price on a new line underneath.
             num_dots = int((line_width - price_width) / dot_width) if dot_width > 0 else 0
             dots = '.' * max(0, num_dots)
             
@@ -240,202 +237,227 @@ def get_theme_styles(theme='dark'):
     </style>
     """
 
-# --- Main UI ---
-st.set_page_config(page_title="Калькулятор анализов", layout="wide")
-st.markdown(get_theme_styles(st.session_state.theme), unsafe_allow_html=True)
-st.markdown("""
-<style>
-    #search-container { position: fixed; top: 0; left: 0; width: 100%; padding: 10px 20px; z-index: 1001; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-    .main-content { margin-top: 80px; }
-    .price-text { text-align: left; font-weight: bold; }
-</style>
-""", unsafe_allow_html=True)
-
-# --- Sidebar ---
-with st.sidebar:
-    st.header("Настройки")
-    is_dark = st.toggle("Темная тема", value=(st.session_state.theme == 'dark'))
-    st.session_state.theme = 'dark' if is_dark else 'light'
+# --- Authorization ---
+def login_form():
+    """Displays the login form and handles authentication."""
+    st.set_page_config(page_title="Авторизация", layout="centered")
+    st.markdown(get_theme_styles(st.session_state.theme), unsafe_allow_html=True)
     
-    st.markdown("---")
-    st.header("Импорт файлов")
-    uploaded_files = st.file_uploader("Выберите .xlsx файлы", type="xlsx", accept_multiple_files=True)
-
-    if uploaded_files:
-        for file in uploaded_files:
-            if file.name not in st.session_state.files:
-                path = save_uploaded_file(file)
-                df = load_data_from_excel(file.getvalue()) 
-                st.session_state.files[file.name] = {'data': df, 'path': path}
-                st.success(f"Файл {file.name} загружен.")
+    with st.container(border=True):
+        st.title("Авторизация")
+        st.write("Пожалуйста, войдите, чтобы продолжить.")
+        username = st.text_input("Имя пользователя", key="username")
+        password = st.text_input("Пароль", type="password", key="password")
+        
+        if st.button("Войти", type="primary"):
+            if username == VALID_USERNAME and password == VALID_PASSWORD:
+                st.session_state.logged_in = True
                 st.rerun()
-
-    # Autoload files from disk
-    for fname in os.listdir(DATA_DIR):
-        if fname.endswith('.xlsx') and fname not in st.session_state.files:
-            path = os.path.join(DATA_DIR, fname)
-            with open(path, "rb") as f:
-                df = load_data_from_excel(f.read())
-            st.session_state.files[fname] = {'data': df, 'path': path}
-
-# --- Main Content ---
-st.markdown('<div class="main-content">', unsafe_allow_html=True)
-st.title("Калькулятор анализов")
-
-st.markdown('<div id="search-container">', unsafe_allow_html=True)
-search_term = st.text_input("Поиск", placeholder="🔍 Поиск по названию, группе или тексту в ячейке", label_visibility="collapsed")
-st.markdown('</div>', unsafe_allow_html=True)
-
-total_sum = 0.0
-
-if not st.session_state.files:
-    st.header("📁 Файлы не загружены")
-    st.info("Пожалуйста, импортируйте один или несколько Excel файлов в боковой панели, чтобы начать работу.")
-else:
-    tab_names = list(st.session_state.files.keys())
-    tabs = st.tabs(tab_names)
-
-    for i, file_name in enumerate(tab_names):
-        with tabs[i]:
-            if file_name not in st.session_state.files: continue
-            
-            file_info = st.session_state.files[file_name]
-            df = file_info['data']
-            
-            # --- Панель управления ---
-            manage_cols = st.columns([2, 2, 1])
-            with manage_cols[0]:
-                is_edit_mode = st.toggle("Редактировать цены", key=f"edit_{file_name}")
-            
-            if is_edit_mode:
-                with manage_cols[1]:
-                    if st.button("💾 Сохранить", key=f"save_{file_name}"):
-                        file_bytes = save_changes_to_file(file_info['path'], df)
-                        if file_bytes:
-                            st.session_state[f'download_{file_name}'] = {"bytes": file_bytes, "name": f"updated_{file_name}"}
-                            st.success("Сохранено!")
-                            load_data_from_excel.clear()
-                            if file_name in st.session_state.files:
-                                del st.session_state.files[file_name]
-                            st.rerun()
-                        else:
-                            st.error("Ошибка сохранения.")
-
-            # --- Кнопка удаления файла ---
-            with manage_cols[2]:
-                if st.button("🗑️ Удалить файл", key=f"delete_{file_name}"):
-                    try:
-                        os.remove(file_info['path'])
-                        # Очищаем все связанные данные из session_state
-                        for key in list(st.session_state.keys()):
-                            if isinstance(st.session_state[key], dict) and file_name in st.session_state[key]:
-                                del st.session_state[key][file_name]
-                        load_data_from_excel.clear()
-                        st.success(f"Файл {file_name} удален.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Не удалось удалить файл: {e}")
-
-            # --- Логика поиска и фильтрации ---
-            filtered_df = pd.DataFrame() # Начинаем с пустого DataFrame
-            if search_term:
-                search_lower = search_term.lower()
-                
-                # Поиск по названию анализа и тексту в ячейках
-                item_mask = (
-                    df['title'].str.lower().str.contains(search_lower, na=False) |
-                    df['color_0_text'].str.lower().str.contains(search_lower, na=False) |
-                    df['color_1_text'].str.lower().str.contains(search_lower, na=False)
-                )
-                
-                # Поиск по названию группы
-                # Заполняем NaN пустыми строками для безопасного поиска
-                df['group'] = df['group'].fillna('')
-                matching_groups = df[df['group'].str.lower().str.contains(search_lower, na=False)]['group'].unique()
-                group_mask = df['group'].isin(matching_groups)
-
-                # Объединяем результаты
-                filtered_df = df[item_mask | group_mask]
             else:
-                filtered_df = df
+                st.error("Неверное имя пользователя или пароль.")
 
-            if filtered_df.empty:
-                st.info("Ничего не найдено.")
-            else:
-                # Группируем и отображаем
-                for group_name, group_df in filtered_df.groupby('group', dropna=False):
-                    # --- СКРЫВАЕМ ГРУППУ "БЕЗ КАТЕГОРИИ" ---
-                    if not group_name or pd.isna(group_name):
-                        continue
+# --- Main Application UI ---
+def main_app():
+    """The main application interface, shown only after login."""
+    st.set_page_config(page_title="Калькулятор анализов", layout="wide")
+    st.markdown(get_theme_styles(st.session_state.theme), unsafe_allow_html=True)
+    st.markdown("""
+    <style>
+        #search-container { position: fixed; top: 0; left: 0; width: 100%; padding: 10px 20px; z-index: 1001; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        .main-content { margin-top: 80px; }
+        .price-text { text-align: left; font-weight: bold; }
+    </style>
+    """, unsafe_allow_html=True)
 
-                    with st.expander(group_name, expanded=bool(search_term)):
-                        for idx, row in group_df.iterrows():
-                            cols = st.columns([5, 1.5, 1.5, 2])
-                            is_checked = idx in st.session_state.selected_analyses.get(file_name, [])
-                            
-                            if cols[0].checkbox(row['title'], value=is_checked, key=f"check_{file_name}_{idx}"):
-                                if not is_checked:
-                                    st.session_state.selected_analyses.setdefault(file_name, []).append(idx)
-                            elif is_checked:
-                                st.session_state.selected_analyses[file_name].remove(idx)
-
-                            cols[1].markdown(get_color_display_html(row, 'color_0'), unsafe_allow_html=True)
-                            cols[2].markdown(get_color_display_html(row, 'color_1'), unsafe_allow_html=True)
-
-                            with cols[3]:
-                                if is_edit_mode:
-                                    new_price = st.number_input("Цена", value=float(row['price']), key=f"price_{file_name}_{idx}", label_visibility="collapsed")
-                                    if new_price != row['price']:
-                                        st.session_state.files[file_name]['data'].at[idx, 'price'] = new_price
-                                else:
-                                    price_str = f"{int(row['price'])}" if row['price'] == int(row['price']) else f"{row['price']:.2f}"
-                                    st.markdown(f"<p class='price-text'>{price_str} сом</p>", unsafe_allow_html=True)
-            
-            selected_indices = st.session_state.selected_analyses.get(file_name, [])
-            if selected_indices:
-                valid_indices = [idx for idx in selected_indices if idx in df.index]
-                total_sum += df.loc[valid_indices, 'price'].sum()
-    
-    # --- Нижняя панель управления ---
-    st.markdown("---")
-    selected_data = []
-    for fname, indices in st.session_state.selected_analyses.items():
-        if indices and fname in st.session_state.files:
-            df_file = st.session_state.files[fname]['data']
-            valid_indices = [idx for idx in indices if idx in df_file.index]
-            for _, row in df_file.loc[valid_indices].iterrows():
-                selected_data.append(row.to_dict())
-
-    if selected_data:
-        receipt_sum = sum(item['price'] for item in selected_data)
+    # --- Sidebar ---
+    with st.sidebar:
+        st.header("Настройки")
+        is_dark = st.toggle("Темная тема", value=(st.session_state.theme == 'dark'))
+        st.session_state.theme = 'dark' if is_dark else 'light'
         
-        button_label = f"🧾 Выбрано: {len(selected_data)} поз. на сумму {receipt_sum:,.2f} сом"
-        if st.button(button_label, key="toggle_selected"):
-            st.session_state.show_selected = not st.session_state.show_selected
+        st.markdown("---")
+        st.header("Импорт файлов")
+        uploaded_files = st.file_uploader("Выберите .xlsx файлы", type="xlsx", accept_multiple_files=True)
 
-        if st.session_state.show_selected:
-            for item in selected_data:
-                cols = st.columns([5, 1.5, 1.5, 2])
-                cols[0].write(item['title'])
-                cols[1].markdown(get_color_display_html(item, 'color_0'), unsafe_allow_html=True)
-                cols[2].markdown(get_color_display_html(item, 'color_1'), unsafe_allow_html=True)
-                cols[3].markdown(f"<p class='price-text'>{item['price']:,.2f} сом</p>", unsafe_allow_html=True)
+        if uploaded_files:
+            for file in uploaded_files:
+                if file.name not in st.session_state.files:
+                    path = save_uploaded_file(file)
+                    df = load_data_from_excel(file.getvalue()) 
+                    st.session_state.files[file.name] = {'data': df, 'path': path}
+                    st.success(f"Файл {file.name} загружен.")
+                    st.rerun()
+
+        # Autoload files from disk
+        for fname in os.listdir(DATA_DIR):
+            if fname.endswith('.xlsx') and fname not in st.session_state.files:
+                path = os.path.join(DATA_DIR, fname)
+                with open(path, "rb") as f:
+                    df = load_data_from_excel(f.read())
+                st.session_state.files[fname] = {'data': df, 'path': path}
         
-        bottom_cols = st.columns([1, 1])
-        pdf_bytes = generate_pdf_receipt(selected_data)
-        if pdf_bytes:
-            bottom_cols[0].download_button("Скачать чек (PDF)", data=pdf_bytes, file_name="check.pdf", mime="application/pdf")
-        
-        if bottom_cols[1].button("🗑️ Очистить все"):
-            st.session_state.selected_analyses.clear()
+        st.markdown("---")
+        st.header("Управление сессией")
+        if st.button("Выйти"):
+            st.session_state.logged_in = False
+            # Clear sensitive data on logout
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
 
-# --- Плавающий итог ---
-total_sum_placeholder = st.empty()
-total_sum_placeholder.markdown(f"""
-<div style="position: fixed; bottom: 10px; right: 100px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
-    <h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3>
-</div>
-""", unsafe_allow_html=True)
 
-st.markdown('</div>', unsafe_allow_html=True)
+    # --- Main Content ---
+    st.markdown('<div class="main-content">', unsafe_allow_html=True)
+    st.title("Калькулятор анализов")
+
+    st.markdown('<div id="search-container">', unsafe_allow_html=True)
+    search_term = st.text_input("Поиск", placeholder="🔍 Поиск по названию, группе или тексту в ячейке", label_visibility="collapsed")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    total_sum = 0.0
+
+    if not st.session_state.files:
+        st.header("📁 Файлы не загружены")
+        st.info("Пожалуйста, импортируйте один или несколько Excel файлов в боковой панели, чтобы начать работу.")
+    else:
+        tab_names = list(st.session_state.files.keys())
+        tabs = st.tabs(tab_names)
+
+        for i, file_name in enumerate(tab_names):
+            with tabs[i]:
+                if file_name not in st.session_state.files: continue
+                
+                file_info = st.session_state.files[file_name]
+                df = file_info['data']
+                
+                manage_cols = st.columns([2, 2, 1])
+                with manage_cols[0]:
+                    is_edit_mode = st.toggle("Редактировать цены", key=f"edit_{file_name}")
+                
+                if is_edit_mode:
+                    with manage_cols[1]:
+                        if st.button("💾 Сохранить", key=f"save_{file_name}"):
+                            file_bytes = save_changes_to_file(file_info['path'], df)
+                            if file_bytes:
+                                st.session_state[f'download_{file_name}'] = {"bytes": file_bytes, "name": f"updated_{file_name}"}
+                                st.success("Сохранено!")
+                                load_data_from_excel.clear()
+                                if file_name in st.session_state.files:
+                                    del st.session_state.files[file_name]
+                                st.rerun()
+                            else:
+                                st.error("Ошибка сохранения.")
+
+                with manage_cols[2]:
+                    if st.button("🗑️ Удалить файл", key=f"delete_{file_name}"):
+                        try:
+                            os.remove(file_info['path'])
+                            for key in list(st.session_state.keys()):
+                                if isinstance(st.session_state[key], dict) and file_name in st.session_state[key]:
+                                    del st.session_state[key][file_name]
+                            load_data_from_excel.clear()
+                            st.success(f"Файл {file_name} удален.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Не удалось удалить файл: {e}")
+
+                filtered_df = pd.DataFrame()
+                if search_term:
+                    search_lower = search_term.lower()
+                    item_mask = (
+                        df['title'].str.lower().str.contains(search_lower, na=False) |
+                        df['color_0_text'].str.lower().str.contains(search_lower, na=False) |
+                        df['color_1_text'].str.lower().str.contains(search_lower, na=False)
+                    )
+                    df['group'] = df['group'].fillna('')
+                    matching_groups = df[df['group'].str.lower().str.contains(search_lower, na=False)]['group'].unique()
+                    group_mask = df['group'].isin(matching_groups)
+                    filtered_df = df[item_mask | group_mask]
+                else:
+                    filtered_df = df
+
+                if filtered_df.empty:
+                    st.info("Ничего не найдено.")
+                else:
+                    for group_name, group_df in filtered_df.groupby('group', dropna=False):
+                        if not group_name or pd.isna(group_name):
+                            continue
+
+                        with st.expander(group_name, expanded=bool(search_term)):
+                            for idx, row in group_df.iterrows():
+                                cols = st.columns([5, 1.5, 1.5, 2])
+                                is_checked = idx in st.session_state.selected_analyses.get(file_name, [])
+                                
+                                if cols[0].checkbox(row['title'], value=is_checked, key=f"check_{file_name}_{idx}"):
+                                    if not is_checked:
+                                        st.session_state.selected_analyses.setdefault(file_name, []).append(idx)
+                                elif is_checked:
+                                    st.session_state.selected_analyses[file_name].remove(idx)
+
+                                cols[1].markdown(get_color_display_html(row, 'color_0'), unsafe_allow_html=True)
+                                cols[2].markdown(get_color_display_html(row, 'color_1'), unsafe_allow_html=True)
+
+                                with cols[3]:
+                                    if is_edit_mode:
+                                        new_price = st.number_input("Цена", value=float(row['price']), key=f"price_{file_name}_{idx}", label_visibility="collapsed")
+                                        if new_price != row['price']:
+                                            st.session_state.files[file_name]['data'].at[idx, 'price'] = new_price
+                                    else:
+                                        price_str = f"{int(row['price'])}" if row['price'] == int(row['price']) else f"{row['price']:.2f}"
+                                        st.markdown(f"<p class='price-text'>{price_str} сом</p>", unsafe_allow_html=True)
+                
+                selected_indices = st.session_state.selected_analyses.get(file_name, [])
+                if selected_indices:
+                    valid_indices = [idx for idx in selected_indices if idx in df.index]
+                    total_sum += df.loc[valid_indices, 'price'].sum()
+        
+        st.markdown("---")
+        selected_data = []
+        for fname, indices in st.session_state.selected_analyses.items():
+            if indices and fname in st.session_state.files:
+                df_file = st.session_state.files[fname]['data']
+                valid_indices = [idx for idx in indices if idx in df_file.index]
+                for _, row in df_file.loc[valid_indices].iterrows():
+                    selected_data.append(row.to_dict())
+
+        if selected_data:
+            receipt_sum = sum(item['price'] for item in selected_data)
+            
+            button_label = f"🧾 Выбрано: {len(selected_data)} поз. на сумму {receipt_sum:,.2f} сом"
+            if st.button(button_label, key="toggle_selected"):
+                st.session_state.show_selected = not st.session_state.show_selected
+
+            if st.session_state.show_selected:
+                for item in selected_data:
+                    cols = st.columns([5, 1.5, 1.5, 2])
+                    cols[0].write(item['title'])
+                    cols[1].markdown(get_color_display_html(item, 'color_0'), unsafe_allow_html=True)
+                    cols[2].markdown(get_color_display_html(item, 'color_1'), unsafe_allow_html=True)
+                    cols[3].markdown(f"<p class='price-text'>{item['price']:,.2f} сом</p>", unsafe_allow_html=True)
+            
+            bottom_cols = st.columns([1, 1])
+            pdf_bytes = generate_pdf_receipt(selected_data)
+            if pdf_bytes:
+                bottom_cols[0].download_button("Скачать чек (PDF)", data=pdf_bytes, file_name="check.pdf", mime="application/pdf")
+            
+            if bottom_cols[1].button("🗑️ Очистить все"):
+                st.session_state.selected_analyses.clear()
+                st.rerun()
+
+    total_sum_placeholder = st.empty()
+    total_sum_placeholder.markdown(f"""
+    <div style="position: fixed; bottom: 10px; right: 100px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
+        <h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# --- Main Application Logic ---
+# This checks if the user is logged in. If not, it shows the login form.
+# Otherwise, it runs the main application.
+if not st.session_state.logged_in:
+    login_form()
+else:
+    main_app()
