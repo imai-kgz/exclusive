@@ -344,7 +344,7 @@ def main_app():
         
         bottom_cols[1].button("🗑️ Очистить все", key="clear_all_button", on_click=clear_all_selections)
 
-    st.markdown(f"""<div style="position: fixed; bottom: 10px; right: 10px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);"><h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div style="position: fixed; bottom: 10px; right: 100px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);"><h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3></div>""", unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # --- App Entry Point ---
