@@ -4,12 +4,14 @@ import os
 from io import BytesIO
 from fpdf import FPDF
 import openpyxl
+import math
 
 # --- Settings ---
 DATA_DIR = "uploaded_files"
 os.makedirs(DATA_DIR, exist_ok=True)
 FONT_REGULAR_PATH = "JetBrainsMono-Regular.ttf"
 FONT_BOLD_PATH = "JetBrainsMono-Bold.ttf"
+ITEMS_PER_PAGE = 30 # Количество анализов на одной странице
 
 # --- User Credentials (from st.secrets) ---
 VALID_USERNAME = st.secrets.get("APP_USERNAME", "admin")
@@ -23,7 +25,8 @@ def initialize_session_state():
         'selected_analyses': {},
         'price_edit_enabled': {},
         'show_selected': False,
-        'logged_in': False
+        'logged_in': False,
+        'pages': {} # Для пагинации
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -92,6 +95,7 @@ def save_changes_to_file(file_path, df_to_save):
         return None
 
 def generate_pdf_receipt(selected_analyses_data):
+    # This function is kept as is, no changes needed for performance.
     pdf = FPDF()
     pdf.add_page()
     try:
@@ -144,6 +148,7 @@ def generate_pdf_receipt(selected_analyses_data):
     pdf.cell(40, 10, txt=f"{total_sum_pdf:,.2f} с", ln=True, align="R")
     return pdf.output(dest="S").encode('latin-1')
 
+
 # --- Helper UI Functions ---
 def get_text_color(bg_color):
     if not bg_color or len(bg_color) != 7: return '#000000'
@@ -159,6 +164,7 @@ def get_color_display_html(item, col_prefix):
     return f"<div style='background-color:{color}; height:20px; width:100%; border-radius:3px;'></div>" if color else ""
 
 def get_theme_styles(theme='dark'):
+    # This function is efficient enough and doesn't need to be cached.
     common_styles = """
     <style>
         #search-container { position: fixed; top: 0; left: 0; width: 100%; padding: 10px 20px; z-index: 1001; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
@@ -217,6 +223,7 @@ def display_sidebar():
                     path = save_uploaded_file(file)
                     df = load_data_from_excel(file.getvalue())
                     st.session_state.files[file.name] = {'data': df, 'path': path}
+            # A single rerun after all files are processed is more efficient.
             st.rerun()
         for fname in os.listdir(DATA_DIR):
             if fname.endswith('.xlsx') and fname not in st.session_state.files:
@@ -226,6 +233,7 @@ def display_sidebar():
         st.markdown("---")
         st.header("Управление сессией")
         if st.button("Выйти"):
+            # Clear all session data on logout for security and a clean start.
             for key in list(st.session_state.keys()): del st.session_state[key]
             st.rerun()
 
@@ -265,9 +273,8 @@ def main_app():
                         load_data_from_excel.clear()
                         del st.session_state.files[file_name]
                         st.rerun()
-                    else:
-                        st.error("Ошибка сохранения.")
-                if manage_cols[2].button("🗑️ Удалить", key=f"delete_{file_name}"):
+                    else: st.error("Ошибка сохранения.")
+                if manage_cols[2].button("🗑️ Удалить", key=f"delete_{file_name}", type="secondary"):
                     try:
                         os.remove(file_info['path'])
                         for key in list(st.session_state.keys()):
@@ -278,14 +285,14 @@ def main_app():
                     except Exception as e:
                         st.error(f"Не удалось удалить файл: {e}")
                 
-                # --- Data Display ---
+                # --- Data Display with Pagination ---
                 filtered_df = df
                 if search_term:
                     search_lower = search_term.lower()
+                    df['group'] = df['group'].fillna('')
                     item_mask = (df['title'].str.lower().str.contains(search_lower, na=False) |
                                  df['color_0_text'].str.lower().str.contains(search_lower, na=False) |
                                  df['color_1_text'].str.lower().str.contains(search_lower, na=False))
-                    df['group'] = df['group'].fillna('')
                     matching_groups = df[df['group'].str.lower().str.contains(search_lower, na=False)]['group'].unique()
                     group_mask = df['group'].isin(matching_groups)
                     filtered_df = df[item_mask | group_mask]
@@ -294,8 +301,20 @@ def main_app():
                 else:
                     for group_name, group_df in filtered_df.groupby('group', dropna=False):
                         if not group_name or pd.isna(group_name): continue
+                        
                         with st.expander(group_name, expanded=bool(search_term)):
-                            for idx, row in group_df.iterrows():
+                            total_items = len(group_df)
+                            total_pages = math.ceil(total_items / ITEMS_PER_PAGE)
+                            page_key = f"page_{file_name}_{group_name}"
+                            if page_key not in st.session_state.pages:
+                                st.session_state.pages[page_key] = 1
+                            
+                            current_page = st.session_state.pages[page_key]
+                            start_idx = (current_page - 1) * ITEMS_PER_PAGE
+                            end_idx = start_idx + ITEMS_PER_PAGE
+                            paginated_df = group_df.iloc[start_idx:end_idx]
+
+                            for idx, row in paginated_df.iterrows():
                                 cols = st.columns([5, 1.5, 1.5, 2])
                                 is_checked = idx in st.session_state.selected_analyses.get(file_name, [])
                                 if cols[0].checkbox(row['title'], value=is_checked, key=f"check_{file_name}_{idx}"):
@@ -310,6 +329,18 @@ def main_app():
                                     else:
                                         price_str = f"{int(row['price'])}" if row['price'] == int(row['price']) else f"{row['price']:.2f}"
                                         st.markdown(f"<p class='price-text'>{price_str} сом</p>", unsafe_allow_html=True)
+
+                            # --- Pagination Controls ---
+                            if total_pages > 1:
+                                st.markdown("---")
+                                nav_cols = st.columns([1, 1, 1])
+                                if nav_cols[0].button("< Пред.", key=f"prev_{page_key}", disabled=(current_page == 1)):
+                                    st.session_state.pages[page_key] -= 1
+                                    st.rerun()
+                                nav_cols[1].markdown(f"<div style='text-align: center;'>Стр {current_page}/{total_pages}</div>", unsafe_allow_html=True)
+                                if nav_cols[2].button("След. >", key=f"next_{page_key}", disabled=(current_page == total_pages)):
+                                    st.session_state.pages[page_key] += 1
+                                    st.rerun()
                 
                 selected_indices = st.session_state.selected_analyses.get(file_name, [])
                 if selected_indices: total_sum += df.loc[df.index.intersection(selected_indices), 'price'].sum()
@@ -342,7 +373,7 @@ def main_app():
                 st.rerun()
 
     st.markdown(f"""
-    <div style="position: fixed; bottom: 10px; right: 100px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
+    <div style="position: fixed; bottom: 10px; right: 10px; background-color: #3f51b5; padding: 15px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0,0,0,0.2);">
         <h3 style="margin: 0; color: #ffffff;">Итого: {total_sum:,.2f} сом</h3>
     </div>
     """, unsafe_allow_html=True)
